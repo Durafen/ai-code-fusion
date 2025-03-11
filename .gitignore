@@ -1,0 +1,74 @@
+# Dependencies
+/node_modules
+/.pnp
+.pnp.js
+/.yarn
+
+# Testing
+/coverage
+/.nyc_output
+
+# Production
+/dist
+/out
+/bin
+/build
+
+# Build outputs
+/src/renderer/index.js
+/src/renderer/index.js.map
+/src/renderer/output.css
+/.tmp*
+/temp
+
+# Package files
+package-lock.json
+yarn.lock
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
+# Editor directories and files
+.idea
+.vscode
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+.project
+.classpath
+.settings/
+*.sublime-*
+
+# Cache files
+.eslintcache
+.stylelintcache
+.parcel-cache
+.cache
+.npm
+.next
+
+# OS files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+._*
+
+# Environment variables and local config
+.env
+.env.local
+.env.*
+.scannerwork/
+
+# Project-specific
+start/
+start/*
+/signed/

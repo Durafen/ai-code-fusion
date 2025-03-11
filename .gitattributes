@@ -1,0 +1,34 @@
+# Set default behavior to automatically normalize line endings
+* text=auto
+
+# Shell scripts should use LF
+*.sh text eol=lf
+.husky/pre-commit text eol=lf
+
+# Batch and PowerShell scripts should use CRLF
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+
+# Documentation and config
+*.md text
+*.json text
+*.yml text
+*.yaml text
+
+# JavaScript and web files
+*.js text
+*.jsx text
+*.ts text
+*.tsx text
+*.css text
+*.html text
+
+# Exclude binary files from line ending conversion
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.ttf binary
+*.woff binary
+*.woff2 binary

@@ -1,0 +1,59 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+.file-tree {
+  font-family:
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    sans-serif;
+}
+
+.file-tree input[type='checkbox'] {
+  cursor: pointer;
+}
+
+/* Animated transitions for folder open/close */
+.transition-all {
+  transition-property: all;
+  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.tab-content {
+  min-height: 500px;
+}
+
+/* Folder and file icons styling */
+.folder-icon,
+.file-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Tree lines for better hierarchy visualization */
+.tree-line {
+  position: relative;
+}
+
+.tree-line::before {
+  content: '';
+  position: absolute;
+  left: -16px;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background-color: #e5e7eb;
+}
+
+.tree-line::after {
+  content: '';
+  position: absolute;
+  left: -16px;
+  top: 10px;
+  width: 12px;
+  height: 1px;
+  background-color: #e5e7eb;
+}

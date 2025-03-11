@@ -1,0 +1,198 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+  packages: read
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Check out Git repository
+        uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Prepare build
+        run: node scripts/prepare-build.js windows
+
+      - name: Build CSS
+        run: npm run build:css
+
+      - name: Build Webpack
+        run: npm run build:webpack
+
+      - name: Build Windows Package
+        run: npm run build:win -- --publish=never
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload Windows Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-artifacts
+          path: dist/*.exe
+          retention-days: 5
+
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out Git repository
+        uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Install required system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libnotify-dev libnss3 libxss1 libgbm-dev
+
+      # Skip prepare-build for Linux as it seems to be causing issues
+      # Instead, directly modify package.json for Linux build
+
+      - name: Configure Linux Build
+        run: |
+          # Create a minimal electron-builder config for Linux
+          node -e "
+            const fs = require('fs');
+            const path = require('path');
+            const packageJsonPath = path.join(process.cwd(), 'package.json');
+            const packageJson = require(packageJsonPath);
+
+            // Remove any existing Linux configuration
+            if (packageJson.build && packageJson.build.linux) {
+              delete packageJson.build.linux;
+            }
+
+            // Set minimal Linux config without any icon reference
+            if (!packageJson.build) packageJson.build = {};
+            packageJson.build.linux = {
+              target: ['AppImage'],
+              category: 'Utility'
+            };
+
+            fs.writeFileSync(packageJsonPath, JSON.stringify(packageJson, null, 2) + '\n');
+          "
+
+      - name: Build CSS
+        run: npm run build:css
+
+      - name: Build Webpack
+        run: npm run build:webpack
+
+      - name: Build Linux AppImage
+        run: npm run build -- --linux AppImage --publish=never
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload Linux Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-artifacts
+          path: dist/*.AppImage
+          retention-days: 5
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - name: Check out Git repository
+        uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Prepare build
+        run: node scripts/prepare-build.js mac
+
+      - name: Build CSS
+        run: npm run build:css
+
+      - name: Build Webpack
+        run: npm run build:webpack
+
+      - name: Build macOS Universal Binary
+        run: npm run build:mac-universal -- --publish=never
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload macOS Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-artifacts
+          path: |
+            dist/*.dmg
+            dist/*.zip
+          retention-days: 5
+
+  create-release:
+    needs: [build-windows, build-linux, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out Git repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get version from tag
+        id: get_version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Get Changelog Entry
+        id: changelog_reader
+        uses: mindsers/changelog-reader-action@v2
+        with:
+          validation_level: warn
+          path: ./CHANGELOG.md
+          version: ${{ steps.get_version.outputs.VERSION }}
+        continue-on-error: true
+
+      - name: Download Windows artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-artifacts
+          path: artifacts
+
+      - name: Download Linux artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-artifacts
+          path: artifacts
+
+      - name: Download macOS artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-artifacts
+          path: artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          name: Release ${{ steps.get_version.outputs.VERSION }}
+          body: ${{ steps.changelog_reader.outputs.changes || 'No changelog provided' }}
+          draft: true
+          files: |
+            artifacts/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
