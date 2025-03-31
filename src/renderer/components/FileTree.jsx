@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import PropTypes from 'prop-types';
 
 // Define item prop shape for reuse
@@ -8,6 +8,24 @@ const ItemPropType = PropTypes.shape({
   type: PropTypes.string.isRequired,
   children: PropTypes.array,
 });
+
+// Helper function to check if item is selected
+const getSelectionStatus = (item, selectedFiles, selectedFolders) => {
+  if (!item) return false;
+
+  const isFile = item.type === 'file';
+  const isFolder = item.type === 'directory';
+
+  if (isFile) {
+    return selectedFiles.includes(item.path);
+  }
+
+  if (isFolder && selectedFolders) {
+    return selectedFolders.includes(item.path);
+  }
+
+  return false;
+};
 
 // Create the FileTreeItem component
 const FileTreeItemComponent = (props) => {
@@ -20,33 +38,14 @@ const FileTreeItemComponent = (props) => {
     onFolderSelect,
   } = props;
 
-  // Calculate initial selection state based on props
-  const isFile = item.type === 'file';
-  const isFolder = item.type === 'directory';
+  // Use direct properties instead of nested ternary
+  const isFile = item?.type === 'file';
+  const isFolder = item?.type === 'directory';
 
-  // Set initial state directly from props
-  const initialSelected = isFile
-    ? selectedFiles.includes(item.path)
-    : isFolder && selectedFolders
-      ? selectedFolders.includes(item.path)
-      : false;
+  // Use helper function instead of nested ternary
+  const checkboxIsSelected = getSelectionStatus(item, selectedFiles, selectedFolders);
 
   const [isOpen, setIsOpen] = useState(false);
-  const [isSelected, setIsSelected] = useState(initialSelected);
-
-  // Keep selection state in sync with props
-  useEffect(() => {
-    const shouldBeSelected = isFile
-      ? selectedFiles.includes(item.path)
-      : isFolder && selectedFolders
-        ? selectedFolders.includes(item.path)
-        : false;
-
-    // Only update if needed
-    if (isSelected !== shouldBeSelected) {
-      setIsSelected(shouldBeSelected);
-    }
-  }, [selectedFiles, selectedFolders, item.path, isFile, isFolder, isSelected]);
 
   const handleToggle = (e) => {
     e.stopPropagation();
@@ -55,8 +54,7 @@ const FileTreeItemComponent = (props) => {
 
   const handleSelect = (e) => {
     e.stopPropagation();
-    const newIsSelected = !isSelected;
-    setIsSelected(newIsSelected);
+    const newIsSelected = !checkboxIsSelected;
 
     if (isFile) {
       onFileSelect(item.path, newIsSelected);
@@ -68,7 +66,6 @@ const FileTreeItemComponent = (props) => {
   const handleCheckboxChange = (e) => {
     e.stopPropagation();
     const newIsSelected = e.target.checked;
-    setIsSelected(newIsSelected);
 
     if (isFile) {
       onFileSelect(item.path, newIsSelected);
@@ -77,31 +74,23 @@ const FileTreeItemComponent = (props) => {
     }
   };
 
-  const handleNameClick = (e) => {
-    if (isFolder) {
-      e.stopPropagation();
-      setIsOpen(!isOpen);
-    }
-  };
-
   // Calculate proper padding for different levels
   const paddingLeft = level * 16; // 16px per level
 
-  // For a smoother UI experience, derive checkbox state directly from props each render
-  const checkboxIsSelected = isFile
-    ? selectedFiles.includes(item.path)
-    : isFolder && selectedFolders
-      ? selectedFolders.includes(item.path)
-      : false;
-
   return (
     <div className='my-1'>
-      <div
-        className={`flex cursor-pointer items-center py-1 hover:bg-gray-100 ${
-          checkboxIsSelected ? 'bg-blue-100' : ''
+      <button
+        type='button'
+        className={`flex items-center py-1 hover:bg-gray-100 dark:hover:bg-gray-700 w-full text-left ${
+          checkboxIsSelected ? 'bg-blue-100 dark:bg-blue-900/30' : ''
         }`}
         style={{ paddingLeft: `${paddingLeft}px` }}
         onClick={handleSelect}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            handleSelect(e);
+          }
+        }}
       >
         <div className='mr-2 shrink-0'>
           <input
@@ -110,13 +99,16 @@ const FileTreeItemComponent = (props) => {
             // Use the directly derived prop value instead of local state
             checked={checkboxIsSelected}
             onChange={handleCheckboxChange}
+            onClick={(e) => e.stopPropagation()}
+            aria-labelledby={`label-${item.path}`}
             className='size-4 cursor-pointer rounded border-gray-300 text-blue-600 focus:ring-blue-500'
           />
         </div>
 
         {isFolder && (
           <button
-            className='mr-1 size-5 shrink-0 rounded text-gray-500 hover:bg-gray-200 focus:outline-none'
+            type='button'
+            className='mr-1 size-5 shrink-0 rounded text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700 focus:outline-none'
             onClick={handleToggle}
             aria-label={isOpen ? 'Collapse folder' : 'Expand folder'}
           >
@@ -124,26 +116,53 @@ const FileTreeItemComponent = (props) => {
           </button>
         )}
 
-        <label
-          htmlFor={`checkbox-${item.path}`}
-          className='flex grow cursor-pointer items-center overflow-hidden'
-          onClick={isFolder ? handleNameClick : undefined}
-        >
+        <div className='flex grow items-center overflow-hidden'>
           {isFile ? (
-            <span className='mr-1 shrink-0 text-gray-500'>📄</span>
+            <>
+              <span className='mr-1 shrink-0 text-gray-500 dark:text-gray-400' aria-hidden='true'>
+                📄
+              </span>
+              <span id={`label-${item.path}`} className='truncate' title={item.path}>
+                {item.name}
+              </span>
+              <label htmlFor={`checkbox-${item.path}`} className='sr-only'>
+                {item.name}
+              </label>
+            </>
           ) : (
-            <span className='mr-1 shrink-0 cursor-pointer text-yellow-500' onClick={handleToggle}>
-              {isOpen ? '📂' : '📁'}
-            </span>
+            <>
+              <button
+                type='button'
+                className='mr-1 flex items-center text-left border-0 bg-transparent p-0 cursor-pointer'
+                onClick={handleToggle}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    handleToggle(e);
+                  }
+                }}
+                aria-expanded={isOpen}
+                aria-label={`${isOpen ? 'Collapse' : 'Expand'} folder ${item.name}`}
+              >
+                <span className='shrink-0 text-yellow-500' aria-hidden='true'>
+                  {isOpen ? '📂' : '📁'}
+                </span>
+                <span
+                  id={`label-${item.path}`}
+                  className='ml-1 truncate font-semibold hover:underline'
+                  title={item.path}
+                >
+                  {item.name}
+                </span>
+              </button>
+              <label htmlFor={`checkbox-${item.path}`} className='sr-only'>
+                {item.name}
+              </label>
+            </>
           )}
-          <span
-            className={`truncate ${isFolder ? 'font-semibold hover:underline' : ''}`}
-            title={item.path} // Show full path on hover for better context
-          >
-            {item.name}
-          </span>
-        </label>
-      </div>
+        </div>
+      </button>
 
       {isFolder && item.children && (
         <div
@@ -284,8 +303,8 @@ const FileTreeComponent = (props) => {
   };
 
   return (
-    <div className='file-tree rounded-md border border-gray-200'>
-      <div className='flex items-center justify-between border-b border-gray-200 bg-gray-50 p-2'>
+    <div className='file-tree rounded-md border border-gray-200 dark:border-gray-700'>
+      <div className='flex items-center justify-between border-b border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800 p-2'>
         <div className='flex items-center'>
           <input
             type='checkbox'
@@ -299,12 +318,12 @@ const FileTreeComponent = (props) => {
           />
           <label
             htmlFor='select-all-checkbox'
-            className='cursor-pointer select-none text-sm font-medium text-gray-700'
+            className='cursor-pointer select-none text-sm font-medium text-gray-700 dark:text-gray-300'
           >
             Select All
           </label>
         </div>
-        <span className='text-xs font-medium text-gray-500'>
+        <span className='text-xs font-medium text-gray-500 dark:text-gray-400'>
           {/* Display file count and total files */}
           <span className='font-medium'>{selectedFiles.length}</span> of {totalFiles} files selected
         </span>
@@ -312,9 +331,9 @@ const FileTreeComponent = (props) => {
 
       <div className='max-h-96 overflow-auto p-2'>
         {!items || items.length === 0 ? (
-          <div className='flex flex-col items-center justify-center p-8 text-center text-gray-500'>
+          <div className='flex flex-col items-center justify-center p-8 text-center text-gray-500 dark:text-gray-400'>
             <svg
-              className='mb-4 size-12 text-gray-400'
+              className='mb-4 size-12 text-gray-400 dark:text-gray-500'
               fill='none'
               stroke='currentColor'
               viewBox='0 0 24 24'

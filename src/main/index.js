@@ -1,14 +1,19 @@
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, protocol } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const yaml = require('yaml');
 const { TokenCounter } = require('../utils/token-counter');
-const { FileAnalyzer } = require('../utils/file-analyzer');
+const { FileAnalyzer, isBinaryFile } = require('../utils/file-analyzer');
 const { ContentProcessor } = require('../utils/content-processor');
 const { GitignoreParser } = require('../utils/gitignore-parser');
+const { loadDefaultConfig } = require('../utils/config-manager');
+const { shouldExclude, getRelativePath, normalizePath } = require('../utils/filter-utils');
 
 // Initialize the gitignore parser
 const gitignoreParser = new GitignoreParser();
+
+// Create a singleton TokenCounter instance for reuse
+const tokenCounter = new TokenCounter();
 
 // Keep a global reference of the window object to avoid garbage collection
 let mainWindow;
@@ -25,6 +30,7 @@ async function createWindow() {
       nodeIntegration: false,
       contextIsolation: true,
       preload: path.join(__dirname, 'preload.js'),
+      additionalArguments: [`--app-dev-mode=${isDevelopment ? 'true' : 'false'}`],
     },
     autoHideMenuBar: true, // Hide the menu bar by default
     icon: path.join(__dirname, '../assets/icon.ico'), // Set the application icon
@@ -41,6 +47,12 @@ async function createWindow() {
     await mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
   }
 
+  // Set up protocol for the public assets folder
+  protocol.registerFileProtocol('assets', (request) => {
+    const url = request.url.slice(9); // Remove 'assets://' prefix
+    return { path: path.normalize(`${__dirname}/../../public/assets/${url}`) };
+  });
+
   // Window closed event
   mainWindow.on('closed', () => {
     mainWindow = null;
@@ -53,7 +65,16 @@ if (process.platform === 'win32') {
 }
 
 // Create window when Electron is ready
-app.whenReady().then(createWindow);
+app.whenReady().then(() => {
+  // Register assets protocol
+  protocol.registerFileProtocol('assets', (request) => {
+    const url = request.url.replace('assets://', '');
+    const assetPath = path.normalize(path.join(__dirname, '../../public/assets', url));
+    return { path: assetPath };
+  });
+
+  createWindow();
+});
 
 // Quit when all windows are closed
 app.on('window-all-closed', () => {
@@ -97,15 +118,27 @@ ipcMain.handle('fs:getDirectoryTree', async (_, dirPath, configContent) => {
     // Check if we should use custom excludes (default to true if not specified)
     const useCustomExcludes = config.use_custom_excludes !== false;
 
-    // Check if we should use gitignore (default to false if not specified)
-    const useGitignore = config.use_gitignore === true;
+    // Check if we should use custom includes (default to true if not specified)
+    const useCustomIncludes = config.use_custom_includes !== false;
 
-    // Start with default critical patterns
-    excludePatterns = ['**/node_modules/**', '**/.git/**', '**/dist/**', '**/build/**'];
+    // Check if we should use gitignore (default to true if not specified)
+    const useGitignore = config.use_gitignore !== false;
+
+    // Start with empty excludePatterns array (no hardcoded patterns)
+    excludePatterns = [''];
 
     // Add custom exclude patterns if enabled
     if (useCustomExcludes && config.exclude_patterns && Array.isArray(config.exclude_patterns)) {
       excludePatterns = [...excludePatterns, ...config.exclude_patterns];
+    }
+
+    // Store include extensions for filtering later (if enabled)
+    if (
+      useCustomIncludes &&
+      config.include_extensions &&
+      Array.isArray(config.include_extensions)
+    ) {
+      excludePatterns.includeExtensions = config.include_extensions;
     }
 
     // Add gitignore patterns if enabled
@@ -123,92 +156,18 @@ ipcMain.handle('fs:getDirectoryTree', async (_, dirPath, configContent) => {
     }
   } catch (error) {
     console.error('Error parsing config:', error);
-    // Fall back to default exclude patterns
-    excludePatterns = ['**/node_modules/**', '**/.git/**', '**/dist/**', '**/build/**'];
+    // Fall back to only hiding .git folder
+    excludePatterns = ['**/.git/**'];
   }
 
-  // Helper function to check if a path should be excluded
-  const shouldExclude = (itemPath, itemName) => {
-    // Use our consistent path normalization function
-    const normalizedPath = getRelativePath(itemPath, dirPath);
+  // Import the fnmatch module
 
-    // Check for common directories to exclude
-    if (['node_modules', '.git', 'dist', 'build'].includes(itemName)) {
-      return true;
-    }
+  // Get the config for filtering
+  const config = configContent ? yaml.parse(configContent) : { exclude_patterns: [] };
 
-    // Special case for root-level files - check if the file name directly matches a pattern
-    // This ensures patterns like ".env" will match files at the root level
-    const isRootLevelFile = normalizedPath.indexOf('/') === -1;
-
-    // First check if path is in include patterns (negated gitignore patterns)
-    // includePatterns take highest priority
-    if (excludePatterns.includePatterns) {
-      for (const pattern of excludePatterns.includePatterns) {
-        try {
-          // Direct match for simple patterns (especially for root-level files)
-          if (isRootLevelFile && !pattern.includes('/') && !pattern.includes('*')) {
-            if (normalizedPath === pattern) {
-              return false; // Include this file
-            }
-          }
-
-          // Simple pattern matching
-          if (pattern.includes('*')) {
-            // Replace ** with wildcard
-            const regexPattern = pattern
-              .replace(/[.+^${}()|[\]\\]/g, '\\$&')
-              .replace(/\*\*/g, '.*')
-              .replace(/\*/g, '[^/]*')
-              .replace(/\?/g, '[^/]');
-
-            // Match against the pattern
-            const regex = new RegExp(`^${regexPattern}$`);
-            if (regex.test(normalizedPath) || regex.test(itemName)) {
-              // This path explicitly matches an include pattern, so don't exclude it
-              return false;
-            }
-          } else if (normalizedPath === pattern || itemName === pattern) {
-            return false;
-          }
-        } catch (error) {
-          console.error(`Error matching include pattern ${pattern}:`, error);
-        }
-      }
-    }
-
-    // Then check exclude patterns
-    for (const pattern of Array.isArray(excludePatterns) ? excludePatterns : []) {
-      try {
-        // Direct match for simple patterns (especially for root-level files)
-        if (isRootLevelFile && !pattern.includes('/') && !pattern.includes('*')) {
-          if (normalizedPath === pattern) {
-            return true; // Exclude this file
-          }
-        }
-
-        // Simple pattern matching
-        if (pattern.includes('*')) {
-          // Replace ** with wildcard
-          const regexPattern = pattern
-            .replace(/[.+^${}()|[\]\\]/g, '\\$&')
-            .replace(/\*\*/g, '.*')
-            .replace(/\*/g, '[^/]*')
-            .replace(/\?/g, '[^/]');
-
-          // Match against the pattern
-          const regex = new RegExp(`^${regexPattern}$`);
-          if (regex.test(normalizedPath) || regex.test(itemName)) {
-            return true;
-          }
-        } else if (normalizedPath === pattern || itemName === pattern) {
-          return true;
-        }
-      } catch (error) {
-        console.error(`Error matching pattern ${pattern}:`, error);
-      }
-    }
-    return false;
+  // Use the shared shouldExclude function from filter-utils
+  const localShouldExclude = (itemPath) => {
+    return shouldExclude(itemPath, dirPath, excludePatterns, config);
   };
 
   const walkDirectory = (dir) => {
@@ -220,7 +179,7 @@ ipcMain.handle('fs:getDirectoryTree', async (_, dirPath, configContent) => {
         const itemPath = path.join(dir, item);
 
         // Skip excluded items based on patterns, but don't exclude binary files from the tree
-        if (shouldExclude(itemPath, item)) {
+        if (localShouldExclude(itemPath)) {
           continue;
         }
 
@@ -273,16 +232,7 @@ ipcMain.handle('fs:getDirectoryTree', async (_, dirPath, configContent) => {
   }
 });
 
-// Utility function to normalize paths consistently
-const normalizePath = (inputPath) => {
-  return inputPath.replace(/\\/g, '/');
-};
-
-// Utility function to get relative path consistently
-const getRelativePath = (filePath, rootPath) => {
-  const relativePath = path.relative(rootPath, filePath);
-  return normalizePath(relativePath);
-};
+// Use the imported normalizePath from filter-utils
 
 // Analyze repository
 ipcMain.handle('repo:analyze', async (_, { rootPath, configContent, selectedFiles }) => {
@@ -362,6 +312,58 @@ ipcMain.handle('repo:analyze', async (_, { rootPath, configContent, selectedFile
   }
 });
 
+// Helper function to generate tree view from filesInfo
+function generateTreeView(filesInfo) {
+  if (!filesInfo || !Array.isArray(filesInfo)) {
+    return '';
+  }
+
+  // Generate a more structured tree view from filesInfo
+  const sortedFiles = [...filesInfo].sort((a, b) => a.path.localeCompare(b.path));
+
+  // Build a path tree
+  const pathTree = {};
+  sortedFiles.forEach((file) => {
+    if (!file || !file.path) return;
+
+    const parts = file.path.split('/');
+    let currentLevel = pathTree;
+
+    parts.forEach((part, index) => {
+      if (!currentLevel[part]) {
+        currentLevel[part] = index === parts.length - 1 ? null : {};
+      }
+
+      if (index < parts.length - 1) {
+        currentLevel = currentLevel[part];
+      }
+    });
+  });
+
+  // Recursive function to print the tree
+  const printTree = (tree, prefix = '', isLast = true) => {
+    const entries = Object.entries(tree);
+    let result = '';
+
+    entries.forEach(([key, value], index) => {
+      const isLastItem = index === entries.length - 1;
+
+      // Print current level
+      result += `${prefix}${isLast ? '└── ' : '├── '}${key}\n`;
+
+      // Print children
+      if (value !== null) {
+        const newPrefix = `${prefix}${isLast ? '    ' : '│   '}`;
+        result += printTree(value, newPrefix, isLastItem);
+      }
+    });
+
+    return result;
+  };
+
+  return printTree(pathTree);
+}
+
 // Process repository
 ipcMain.handle('repo:process', async (_, { rootPath, filesInfo, treeView, options = {} }) => {
   try {
@@ -377,11 +379,14 @@ ipcMain.handle('repo:process', async (_, { rootPath, filesInfo, treeView, option
 
     let processedContent = '# Repository Content\n\n';
 
-    // Add tree view if provided
-    if (treeView) {
+    // Add tree view if requested in options, whether provided or not
+    if (options.includeTreeView) {
       processedContent += '## File Structure\n\n';
       processedContent += '```\n';
-      processedContent += treeView;
+
+      // If treeView was provided, use it, otherwise generate a more complete one
+      processedContent += treeView || generateTreeView(filesInfo);
+
       processedContent += '```\n\n';
       processedContent += '## File Contents\n\n';
     }
@@ -390,13 +395,24 @@ ipcMain.handle('repo:process', async (_, { rootPath, filesInfo, treeView, option
     let processedFiles = 0;
     let skippedFiles = 0;
 
-    for (const { path: filePath, tokens } of filesInfo) {
+    for (const fileInfo of filesInfo ?? []) {
       try {
+        if (!fileInfo || !fileInfo.path) {
+          console.warn('Skipping invalid file info entry');
+          skippedFiles++;
+          continue;
+        }
+
+        const { path: filePath, tokens = 0 } = fileInfo;
+
         // Use consistent path joining
         const fullPath = path.join(rootPath, filePath);
 
         // Validate the full path is within the root path
-        if (!normalizePath(fullPath).startsWith(normalizePath(rootPath))) {
+        const normalizedFullPath = normalizePath(fullPath);
+        const normalizedRootPath = normalizePath(rootPath);
+
+        if (!normalizedFullPath.startsWith(normalizedRootPath)) {
           console.warn(`Skipping file outside root directory: ${filePath}`);
           skippedFiles++;
           continue;
@@ -415,24 +431,19 @@ ipcMain.handle('repo:process', async (_, { rootPath, filesInfo, treeView, option
           skippedFiles++;
         }
       } catch (error) {
-        console.warn(`Failed to process ${filePath}: ${error.message}`);
+        console.warn(`Failed to process file: ${error.message}`);
         skippedFiles++;
       }
     }
 
     processedContent += '\n--END--\n';
-    processedContent += `Total tokens: ${totalTokens}\n`;
-    processedContent += `Processed files: ${processedFiles}\n`;
-
-    if (skippedFiles > 0) {
-      processedContent += `Skipped files: ${skippedFiles}\n`;
-    }
 
     return {
       content: processedContent,
       totalTokens,
       processedFiles,
       skippedFiles,
+      filesInfo: filesInfo, // Add filesInfo to the response
     };
   } catch (error) {
     console.error('Error processing repository:', error);
@@ -463,4 +474,78 @@ ipcMain.handle('fs:saveFile', async (_, { content, defaultPath }) => {
 ipcMain.handle('gitignore:resetCache', () => {
   gitignoreParser.clearCache();
   return true;
+});
+
+// Get default configuration
+ipcMain.handle('config:getDefault', async () => {
+  try {
+    return loadDefaultConfig();
+  } catch (error) {
+    console.error('Error loading default config:', error);
+    throw error;
+  }
+});
+
+// Get path to an asset
+ipcMain.handle('assets:getPath', (_, assetName) => {
+  try {
+    const assetPath = path.join(__dirname, '..', 'assets', assetName);
+    if (fs.existsSync(assetPath)) {
+      return assetPath;
+    }
+    console.error(`Asset not found: ${assetName} at ${assetPath}`);
+    return null;
+  } catch (error) {
+    console.error('Error getting asset path:', error);
+    return null;
+  }
+});
+
+// Count tokens for multiple files in a single call
+ipcMain.handle('tokens:countFiles', async (_, filePaths) => {
+  try {
+    const results = {};
+    const stats = {};
+
+    // Process each file
+    for (const filePath of filePaths) {
+      try {
+        // Check if file exists
+        if (!fs.existsSync(filePath)) {
+          console.warn(`File not found for token counting: ${filePath}`);
+          results[filePath] = 0;
+          continue;
+        }
+
+        // Get file stats
+        const fileStats = fs.statSync(filePath);
+        stats[filePath] = {
+          size: fileStats.size,
+          mtime: fileStats.mtime.getTime(), // Modification time for cache validation
+        };
+
+        // Skip binary files
+        if (isBinaryFile(filePath)) {
+          console.log(`Skipping binary file for token counting: ${filePath}`);
+          results[filePath] = 0;
+          continue;
+        }
+
+        // Read file content
+        const content = fs.readFileSync(filePath, { encoding: 'utf-8', flag: 'r' });
+
+        // Count tokens using the singleton token counter
+        const tokenCount = tokenCounter.countTokens(content);
+        results[filePath] = tokenCount;
+      } catch (error) {
+        console.error(`Error counting tokens for file ${filePath}:`, error);
+        results[filePath] = 0;
+      }
+    }
+
+    return { results, stats };
+  } catch (error) {
+    console.error(`Error counting tokens for files:`, error);
+    return { results: {}, stats: {} };
+  }
 });

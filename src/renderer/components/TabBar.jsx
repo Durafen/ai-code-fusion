@@ -3,23 +3,23 @@ import PropTypes from 'prop-types';
 
 const TabBar = ({ activeTab, onTabChange }) => {
   const tabs = [
-    { id: 'config', label: 'Configuration' },
+    { id: 'config', label: 'Start' },
     { id: 'source', label: 'Select Files' },
-    { id: 'analyze', label: 'Analysis Results' },
     { id: 'processed', label: 'Processed Output' },
   ];
 
   return (
-    <div className='mb-4 flex border-b border-gray-300'>
+    <div className='flex flex-grow'>
       {tabs.map((tab) => (
         <button
           key={tab.id}
-          className={`px-4 py-2 ${
+          className={`px-6 py-2 font-medium transition-colors ${
             activeTab === tab.id
-              ? 'rounded-t-lg border-x border-t border-gray-300 bg-white text-blue-600'
-              : 'bg-gray-200 text-gray-700'
+              ? 'bg-gray-800 dark:bg-gray-700 text-white'
+              : 'text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700'
           }`}
           onClick={() => onTabChange(tab.id)}
+          data-tab={tab.id}
         >
           {tab.label}
         </button>

@@ -27,12 +27,39 @@ if /i "%1"=="release" (
   exit /b %errorlevel%
 )
 
+rem Special handling for sonar command on Windows
+if /i "%1"=="sonar" (
+  echo Running: npm run sonar
+
+  rem Check if .env file exists and load it
+  if exist ".env" (
+    echo Loading environment variables from .env file
+    for /F "tokens=*" %%A in (.env) do (
+      set line=%%A
+      if not "!line:~0,1!"=="#" (
+        for /f "tokens=1,2 delims==" %%G in ("!line!") do (
+          set "%%G=%%H"
+        )
+      )
+    )
+  ) else (
+    echo Warning: .env file not found
+  )
+
+  npm run sonar
+  exit /b %errorlevel%
+)
+
 rem Special handling for dev command on Windows
 if /i "%1"=="dev" (
   echo Starting development environment for Windows...
 
   rem Set environment variables
   set NODE_ENV=development
+
+  rem Cleanup
+  echo Cleanup...
+  call npm run clean
 
   rem Build CSS if needed
   if not exist "src\renderer\output.css" (

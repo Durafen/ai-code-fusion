@@ -7,7 +7,7 @@ class ContentProcessor {
     this.tokenCounter = tokenCounter;
   }
 
-  processFile(filePath, relativePath, options = {}) {
+  processFile(filePath, relativePath) {
     try {
       // For binary files, show a note instead of content
       if (isBinaryFile(filePath)) {
@@ -31,16 +31,13 @@ class ContentProcessor {
         return formattedContent;
       }
 
-      // Process only text files
+      // Always read the file fresh from disk to ensure we have the latest content
+      // This is important for the refresh functionality
+      console.log(`Reading fresh content from: ${filePath}`);
       const content = fs.readFileSync(filePath, { encoding: 'utf-8', flag: 'r' });
-      const tokenCount = this.tokenCounter.countTokens(content);
 
-      // Show token count if requested (default is true)
-      const showTokenCount = options.showTokenCount !== false;
-
-      const headerContent = showTokenCount
-        ? `${relativePath} (${tokenCount} tokens)`
-        : `${relativePath}`;
+      // Always use just the path without token count
+      const headerContent = `${relativePath}`;
 
       const formattedContent =
         `######\n` + `${headerContent}\n` + `######\n\n` + `\`\`\`\n${content}\n\`\`\`\n\n`;
@@ -72,6 +69,11 @@ class ContentProcessor {
 
         try {
           const tokens = parseInt(lines[i + 1].trim());
+          // Skip entries with invalid token counts (NaN)
+          if (isNaN(tokens)) {
+            console.warn(`Skipping entry with invalid token count: ${path}`);
+            continue;
+          }
           // Clean up the path
           const cleanPath = path.replace(/\\/g, '/').trim();
           filesToProcess.push({ path: cleanPath, tokens });

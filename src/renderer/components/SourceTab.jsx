@@ -1,6 +1,38 @@
 import React, { useState } from 'react';
 import PropTypes from 'prop-types';
+import yaml from 'yaml';
 import FileTree from './FileTree';
+
+// Helper function to update token cache
+const updateTokenCache = (results, stats, setTokenCache) => {
+  setTokenCache((prevCache) => {
+    const newCache = { ...prevCache };
+
+    // Add new entries to cache
+    Object.entries(results).forEach(([file, tokenCount]) => {
+      newCache[file] = {
+        tokenCount,
+        mtime: stats[file]?.mtime || Date.now(),
+        size: stats[file]?.size || 0,
+      };
+    });
+
+    return newCache;
+  });
+};
+
+// Helper function to get process button class
+const getProcessButtonClass = (rootPath, selectedFiles, isAnalyzing) => {
+  const isDisabled = !rootPath || selectedFiles.length === 0 || isAnalyzing;
+
+  const baseClass =
+    'inline-flex items-center border border-transparent px-5 py-2 text-sm font-medium text-white shadow-sm';
+  const enabledClass =
+    'bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2';
+  const disabledClass = 'cursor-not-allowed bg-gray-400';
+
+  return `${baseClass} ${isDisabled ? disabledClass : enabledClass}`;
+};
 
 const SourceTab = ({
   rootPath,
@@ -12,50 +44,201 @@ const SourceTab = ({
   onFolderSelect,
   onAnalyze,
 }) => {
-  const [supportingText, setSupportingText] = useState('');
   const [isAnalyzing, setIsAnalyzing] = useState(false);
 
   const handleDirectorySelect = async () => {
+    // Clear the token cache when selecting a new directory
+    setTokenCache({});
+    setTotalTokens(0);
+    if (pendingCalculationRef.current) {
+      clearTimeout(pendingCalculationRef.current);
+    }
     await onDirectorySelect();
-    // Update message to make it clear selections are reset
-    setSupportingText(
-      'New directory selected. All previous selections have been cleared. Please select files or folders to analyze.'
-    );
   };
 
-  // No tree view generation needed in SourceTab anymore
+  // State to check if we should show token count
+  const [showTokenCount, setShowTokenCount] = useState(true);
+  // State for token counting
+  const [totalTokens, setTotalTokens] = useState(0);
+  const [isCalculating, setIsCalculating] = useState(false);
+
+  // Enhanced token cache with metadata
+  const [tokenCache, setTokenCache] = useState({});
+
+  // Reference to store pending calculations (for cleanup)
+  const pendingCalculationRef = React.useRef(null);
+
+  // Get the config on component mount to see if we should show token count
+  React.useEffect(() => {
+    try {
+      const configContent = localStorage.getItem('configContent');
+      if (configContent) {
+        const config = yaml.parse(configContent);
+        setShowTokenCount(config.show_token_count !== false);
+      }
+    } catch (error) {
+      console.error('Error parsing config for token count visibility:', error);
+    }
+  }, []);
+
+  // Debounced token calculation with improved cache handling
+  React.useEffect(() => {
+    // Clean up any previous calculation
+    if (pendingCalculationRef.current) {
+      clearTimeout(pendingCalculationRef.current);
+    }
+
+    // If no files, just reset and return
+    if (selectedFiles.length === 0) {
+      setTotalTokens(0);
+      setIsCalculating(false);
+      return;
+    }
+
+    // Set calculating flag
+    setIsCalculating(true);
+
+    // First, calculate total from already cached files
+    const cachedTotal = selectedFiles.reduce((sum, file) => {
+      return sum + (tokenCache[file]?.tokenCount || 0);
+    }, 0);
+
+    // Update with the cached total immediately
+    setTotalTokens(cachedTotal);
+
+    // Identify files that need processing (not in cache)
+    const filesToProcess = selectedFiles.filter((file) => !tokenCache[file]);
+
+    // If all files are already cached, we're done
+    if (filesToProcess.length === 0) {
+      setIsCalculating(false);
+      return;
+    }
+
+    // Debounce processing to avoid rapid recalculations
+    pendingCalculationRef.current = setTimeout(async () => {
+      try {
+        // Process files in reasonable batches (max 20 at a time)
+        const batchSize = Math.min(20, filesToProcess.length);
+        const fileBatch = filesToProcess.slice(0, batchSize);
+
+        // Get token counts for the batch
+        const { results, stats } = await window.electronAPI.countFilesTokens(fileBatch);
+
+        // Extract cache update logic to avoid nested function
+        updateTokenCache(results, stats, setTokenCache);
+
+        // Calculate new total (including cached files)
+        const newTotal = selectedFiles.reduce((sum, file) => {
+          return (
+            sum +
+            (results[file] || // Use new results if available
+              tokenCache[file]?.tokenCount || // Or use cached value
+              0) // Fallback to 0
+          );
+        }, 0);
+
+        setTotalTokens(newTotal);
+
+        // If we still have more files to process, schedule another calculation
+        if (filesToProcess.length > batchSize) {
+          // Schedule processing for the remaining files
+          pendingCalculationRef.current = setTimeout(() => {
+            // Force re-running the effect with the existing selection
+            // This will use the updated cache and process the next batch
+            const event = new Event('tokenCalculationContinue');
+            window.dispatchEvent(event);
+          }, 10);
+        } else {
+          // All done
+          setIsCalculating(false);
+        }
+      } catch (error) {
+        console.error('Error calculating tokens:', error);
+        setIsCalculating(false);
+      }
+    }, 300); // 300ms debounce
+
+    return () => {
+      if (pendingCalculationRef.current) {
+        clearTimeout(pendingCalculationRef.current);
+      }
+    };
+  }, [selectedFiles, tokenCache]);
+
+  // Add listener for continuation of token calculation
+  React.useEffect(() => {
+    const handleContinue = () => {
+      // Instead of directly setting selectedFiles, we manually trigger
+      // recalculation by forcing a token cache update
+      setTokenCache((prevCache) => ({ ...prevCache }));
+    };
+
+    window.addEventListener('tokenCalculationContinue', handleContinue);
+
+    return () => {
+      window.removeEventListener('tokenCalculationContinue', handleContinue);
+    };
+  }, []);
 
   return (
     <div>
       <div className='mb-4'>
-        <label className='mb-1 block text-sm font-medium text-gray-700'>Folder selector</label>
         <div className='flex'>
           <input
             type='text'
-            className='grow rounded-md border border-gray-300 px-3 py-2 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-blue-500'
+            className='grow border border-gray-300 dark:border-gray-700 dark:bg-gray-700 dark:text-white px-3 py-2 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-blue-500 cursor-pointer'
             value={rootPath}
             readOnly
             placeholder='Select a root folder'
+            onClick={handleDirectorySelect}
+            title='Click to browse for a directory'
           />
           <button
             onClick={handleDirectorySelect}
-            className='ml-2 inline-flex items-center rounded-md border border-transparent bg-blue-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2'
+            className='ml-2 inline-flex items-center border border-transparent bg-blue-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 dark:focus:ring-offset-gray-800'
           >
-            Browse
+            <svg
+              className='w-4 h-4 mr-1'
+              fill='none'
+              stroke='currentColor'
+              viewBox='0 0 24 24'
+              xmlns='http://www.w3.org/2000/svg'
+            >
+              <path
+                strokeLinecap='round'
+                strokeLinejoin='round'
+                strokeWidth={2}
+                d='M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z'
+              />
+            </svg>
+            Change Folder
           </button>
-          {rootPath && (
+        </div>
+      </div>
+
+      {/* Processing Summary and Process Button on same line */}
+      <div className='mb-4 flex justify-between items-center'>
+        {rootPath && (
+          <div className='flex space-x-2'>
             <button
-              onClick={() => {
-                // We're reusing the directory select function, which now properly resets state
-                onDirectorySelect();
-                // Update supporting text to indicate refresh
-                setSupportingText('Directory refreshed. Select files or folders to analyze.');
+              onClick={async () => {
+                // Clear the token cache when refreshing the file list
+                setTokenCache({});
+                setTotalTokens(0);
+                if (pendingCalculationRef.current) {
+                  clearTimeout(pendingCalculationRef.current);
+                }
+                // Refresh files list only
+                if (window.refreshDirectoryTree) {
+                  await window.refreshDirectoryTree();
+                }
               }}
-              className='ml-2 inline-flex items-center rounded-md border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 shadow-sm hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2'
-              title='Refresh the directory tree with current exclude patterns'
+              className='inline-flex items-center border border-transparent bg-green-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 dark:focus:ring-offset-gray-800'
+              title='Refresh the file list'
             >
               <svg
-                className='size-5'
+                className='size-4 mr-1'
                 fill='none'
                 stroke='currentColor'
                 viewBox='0 0 24 24'
@@ -68,88 +251,156 @@ const SourceTab = ({
                   d='M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15'
                 />
               </svg>
+              Refresh file list
             </button>
-          )}
-        </div>
-      </div>
 
-      {supportingText && (
-        <div className='mb-4 rounded-md border border-blue-100 bg-blue-50 p-3'>
-          <div className='flex'>
-            <div className='shrink-0'>
+            <button
+              onClick={() => {
+                // Clear selected files only
+                selectedFiles.forEach((file) => onFileSelect(file, false));
+                setTotalTokens(0);
+                if (pendingCalculationRef.current) {
+                  clearTimeout(pendingCalculationRef.current);
+                  pendingCalculationRef.current = null;
+                }
+                setIsCalculating(false);
+                // No need to clear cache here as we can reuse it later
+              }}
+              className='inline-flex items-center border border-transparent bg-gray-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-gray-500 focus:ring-offset-2 dark:focus:ring-offset-gray-800'
+              title='Clear all selected files'
+            >
               <svg
-                className='size-5 text-blue-400'
+                className='size-4 mr-1'
+                fill='none'
+                stroke='currentColor'
+                viewBox='0 0 24 24'
                 xmlns='http://www.w3.org/2000/svg'
-                viewBox='0 0 20 20'
-                fill='currentColor'
-                aria-hidden='true'
               >
                 <path
-                  fillRule='evenodd'
-                  d='M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z'
-                  clipRule='evenodd'
+                  strokeLinecap='round'
+                  strokeLinejoin='round'
+                  strokeWidth='2'
+                  d='M6 18L18 6M6 6l12 12'
                 />
               </svg>
-            </div>
-            <div className='ml-3'>
-              <p className='text-sm text-blue-700'>{supportingText}</p>
-              {directoryTree.length > 0 && (
-                <p className='mt-1 text-xs text-blue-600'>
-                  <span className='font-medium'>Tip:</span> Click on folder names to
-                  expand/collapse. Use checkboxes to select files and folders.
-                </p>
-              )}
-            </div>
+              Clear selection
+            </button>
           </div>
+        )}
+
+        <div className='flex items-center space-x-4'>
+          <div className='flex items-center'>
+            <span className='text-sm text-gray-500 dark:text-gray-400 mr-2'>Files</span>
+            <span className='text-lg font-bold text-blue-600'>{selectedFiles.length}</span>
+          </div>
+
+          {showTokenCount && (
+            <>
+              <div className='text-gray-400 mx-1'>|</div>
+              <div className='flex items-center'>
+                <span className='text-sm text-gray-500 dark:text-gray-400 mr-2'>Tokens</span>
+                <span className='text-lg font-bold text-green-600'>
+                  {totalTokens.toLocaleString()}
+                  {isCalculating && (
+                    <svg
+                      className='inline-block animate-spin ml-2 h-4 w-4'
+                      xmlns='http://www.w3.org/2000/svg'
+                      fill='none'
+                      viewBox='0 0 24 24'
+                    >
+                      <circle
+                        className='opacity-25'
+                        cx='12'
+                        cy='12'
+                        r='10'
+                        stroke='currentColor'
+                        strokeWidth='4'
+                      ></circle>
+                      <path
+                        className='opacity-75'
+                        fill='currentColor'
+                        d='M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z'
+                      ></path>
+                    </svg>
+                  )}
+                </span>
+              </div>
+            </>
+          )}
         </div>
-      )}
+
+        {/* Extract nested ternary from button class */}
+        <button
+          onClick={() => {
+            setIsAnalyzing(true);
+            onAnalyze().finally(() => {
+              setIsAnalyzing(false);
+            });
+          }}
+          disabled={!rootPath || selectedFiles.length === 0 || isAnalyzing}
+          className={getProcessButtonClass(rootPath, selectedFiles, isAnalyzing)}
+        >
+          {isAnalyzing ? (
+            <>
+              <svg
+                className='animate-spin -ml-1 mr-2 h-4 w-4 text-white'
+                xmlns='http://www.w3.org/2000/svg'
+                fill='none'
+                viewBox='0 0 24 24'
+              >
+                <circle
+                  className='opacity-25'
+                  cx='12'
+                  cy='12'
+                  r='10'
+                  stroke='currentColor'
+                  strokeWidth='4'
+                ></circle>
+                <path
+                  className='opacity-75'
+                  fill='currentColor'
+                  d='M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z'
+                ></path>
+              </svg>
+              Processing...
+            </>
+          ) : (
+            <>
+              <svg
+                className='w-4 h-4 mr-2'
+                xmlns='http://www.w3.org/2000/svg'
+                fill='none'
+                viewBox='0 0 24 24'
+                stroke='currentColor'
+              >
+                <path
+                  strokeLinecap='round'
+                  strokeLinejoin='round'
+                  strokeWidth={2}
+                  d='M13 10V3L4 14h7v7l9-11h-7z'
+                />
+              </svg>
+              Process Selected Files
+            </>
+          )}
+        </button>
+      </div>
 
       {directoryTree.length > 0 ? (
         <div className='mb-6'>
-          <div className='mb-2 flex items-center justify-between'>
-            <label className='block text-sm font-medium text-gray-700'>
+          <div className='mb-2 flex items-center'>
+            <label
+              htmlFor='file-folder-selection'
+              className='block text-sm font-medium text-gray-700 dark:text-gray-300'
+            >
               Select Files and Folders
             </label>
-            <div className='text-sm font-medium text-blue-600'>
-              {selectedFiles.length > 0 ? (
-                <span>
-                  {selectedFiles.length} file{selectedFiles.length !== 1 ? 's' : ''} selected
-                </span>
-              ) : (
-                <span>No files selected</span>
-              )}
-            </div>
           </div>
 
-          {/* Notice about excluded directories */}
-          <div className='mb-3 rounded-md border border-green-100 bg-green-50 p-2 text-sm text-green-800'>
-            <div className='flex'>
-              <div className='shrink-0'>
-                <svg
-                  className='size-5 text-green-500'
-                  fill='none'
-                  stroke='currentColor'
-                  viewBox='0 0 24 24'
-                  xmlns='http://www.w3.org/2000/svg'
-                >
-                  <path
-                    strokeLinecap='round'
-                    strokeLinejoin='round'
-                    strokeWidth='2'
-                    d='M5 13l4 4L19 7'
-                  />
-                </svg>
-              </div>
-              <p className='ml-2'>
-                <span className='font-medium'>Note:</span> Large directories like{' '}
-                <code className='rounded bg-green-100 px-1 text-xs font-mono'>node_modules</code>,{' '}
-                <code className='rounded bg-green-100 px-1 text-xs font-mono'>.git</code>, etc. are
-                excluded based on your configuration, improving performance.
-              </p>
-            </div>
-          </div>
-
-          <div className='rounded-md border border-gray-200 shadow-sm'>
+          <div
+            id='file-folder-selection'
+            className='rounded-md border border-gray-200 dark:border-gray-700 shadow-sm'
+          >
             <FileTree
               items={directoryTree}
               selectedFiles={selectedFiles}
@@ -178,72 +429,6 @@ const SourceTab = ({
           <p className='mt-2 text-gray-500'>Loading directory content...</p>
         </div>
       ) : null}
-
-      <div className='mt-6 flex items-center justify-between'>
-        <div className='text-sm text-gray-500'>
-          {selectedFiles.length > 0 ? (
-            <span>
-              {selectedFiles.length} file{selectedFiles.length !== 1 ? 's' : ''} selected
-              {/* Add a button to clear selections if needed */}
-              <button
-                onClick={(e) => {
-                  e.preventDefault();
-                  // Call the parent's onFileSelect for each file to deselect it
-                  selectedFiles.forEach((file) => onFileSelect(file, false));
-                }}
-                className='ml-2 text-xs text-blue-600 hover:text-blue-800 hover:underline'
-              >
-                (clear)
-              </button>
-            </span>
-          ) : (
-            <span>No files selected</span>
-          )}
-        </div>
-
-        <button
-          onClick={() => {
-            setIsAnalyzing(true);
-            onAnalyze().finally(() => {
-              setIsAnalyzing(false);
-            });
-          }}
-          disabled={!rootPath || selectedFiles.length === 0 || isAnalyzing}
-          className={`inline-flex items-center rounded-md border border-transparent px-5 py-2 text-sm font-medium text-white shadow-sm ${
-            !rootPath || selectedFiles.length === 0 || isAnalyzing
-              ? 'cursor-not-allowed bg-gray-400'
-              : 'bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2'
-          }`}
-        >
-          {isAnalyzing ? (
-            <>
-              <svg
-                className='animate-spin -ml-1 mr-2 h-4 w-4 text-white'
-                xmlns='http://www.w3.org/2000/svg'
-                fill='none'
-                viewBox='0 0 24 24'
-              >
-                <circle
-                  className='opacity-25'
-                  cx='12'
-                  cy='12'
-                  r='10'
-                  stroke='currentColor'
-                  strokeWidth='4'
-                ></circle>
-                <path
-                  className='opacity-75'
-                  fill='currentColor'
-                  d='M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z'
-                ></path>
-              </svg>
-              Analyzing...
-            </>
-          ) : (
-            <>Analyze Files</>
-          )}
-        </button>
-      </div>
 
       {isAnalyzing && (
         <div className='mt-4 p-4 bg-blue-50 rounded-md border border-blue-100'>
